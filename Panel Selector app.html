@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Advanced Panel Snipper</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: sans-serif;
+    }
+    canvas {
+      border: 2px solid black;
+      display: block;
+      margin: 20px auto;
+      cursor: crosshair;
+    }
+    #controls {
+      text-align: center;
+      margin: 10px;
+      padding: 10px;
+      background: #f5f5f5;
+    }
+    button, select {
+      padding: 8px 15px;
+      background: orange;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    #panelList {
+      margin: 20px auto;
+      width: 90%;
+      border-collapse: collapse;
+    }
+    #panelList th, #panelList td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    #panelList tr:nth-child(even) {
+      background-color: #f2f2f2;
+    }
+    .selected-panel {
+      background-color: #ffeb3b !important;
+    }
+    .mode-active {
+      background-color: #4CAF50 !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <input type="file" id="imageUpload" accept="image/*">
+    <select id="shapeType">
+      <option value="rectangle">Rectangle</option>
+      <option value="polygon">Polygon</option>
+    </select>
+    <button id="completePolygonBtn" style="display:none">Complete Polygon</button>
+    <button id="clearBtn">Clear All</button>
+    <button id="undoBtn">Undo (Ctrl+Z)</button>
+    <button id="exportBtn">Export JSON</button>
+    <a id="downloadLink" style="display:none"></a>
+  </div>
+  <canvas id="canvas"></canvas>
+  
+  <table id="panelList">
+    <thead>
+      <tr>
+        <th>Panel</th>
+        <th>Type</th>
+        <th>Coordinates</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="panelTableBody"></tbody>
+  </table>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const panelTableBody = document.getElementById('panelTableBody');
+    const shapeTypeSelect = document.getElementById('shapeType');
+    const completePolygonBtn = document.getElementById('completePolygonBtn');
+    
+    let img = null;
+    let scale = 1;
+    let panels = [];
+    let undonePanels = [];
+    let currentShape = null;
+    let selectedPanelIndex = -1;
+    let isDrawing = false;
+    let currentMode = 'rectangle';
+
+    // Initialize
+    shapeTypeSelect.addEventListener('change', (e) => {
+      currentMode = e.target.value;
+      completePolygonBtn.style.display = currentMode === 'polygon' ? 'inline-block' : 'none';
+      resetCurrentShape();
+    });
+
+    // Image Upload Handler
+    document.getElementById('imageUpload').onchange = e => {
+      const file = e.target.files[0];
+      if (!file || !file.type.startsWith('image/')) {
+        alert('Please upload a valid image file.');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(evt) {
+        const newImg = new Image();
+        newImg.onload = () => {
+          img = newImg;
+          scale = Math.min(800 / img.width, 600 / img.height);
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          redraw();
+          panels = [];
+          undonePanels = [];
+          updatePanelTable();
+        };
+        newImg.onerror = () => {
+          alert('Error loading image.');
+        };
+        newImg.src = evt.target.result;
+      };
+      reader.readAsDataURL(file);
+    };
+
+    // Canvas Event Handlers
+    canvas.onmousedown = e => {
+      if (!img) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / scale;
+      const y = (e.clientY - rect.top) / scale;
+      
+      // Check if clicking on existing panel
+      selectedPanelIndex = -1;
+      for (let i = panels.length - 1; i >= 0; i--) {
+        const panel = panels[i];
+        if (isPointInShape({x, y}, panel)) {
+          selectedPanelIndex = i;
+          updatePanelTable();
+          redraw();
+          
+          // If holding shift, delete the panel
+          if (e.shiftKey) {
+            undonePanels.push(panels.splice(i, 1)[0]);
+            updatePanelTable();
+            redraw();
+          }
+          return;
+        }
+      }
+      
+      // Start drawing new shape
+      if (currentMode === 'rectangle') {
+        isDrawing = true;
+        currentShape = {
+          type: 'rectangle',
+          points: [{x, y}],
+          complete: false
+        };
+      } else if (currentMode === 'polygon') {
+        if (!currentShape) {
+          currentShape = {
+            type: 'polygon',
+            points: [{x, y}],
+            complete: false
+          };
+        } else if (!currentShape.complete) {
+          currentShape.points.push({x, y});
+        }
+        isDrawing = true;
+      }
+      
+      redraw();
+    };
+
+    canvas.onmousemove = e => {
+      if (!isDrawing || !img || !currentShape) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / scale;
+      const y = (e.clientY - rect.top) / scale;
+      
+      if (currentMode === 'rectangle' && currentShape.points.length === 1) {
+        // Update rectangle dimensions
+        const start = currentShape.points[0];
+        currentShape = {
+          type: 'rectangle',
+          points: [
+            start,
+            {x: start.x, y: y},
+            {x: x, y: y},
+            {x: x, y: start.y}
+          ],
+          complete: false
+        };
+      }
+      
+      redraw();
+      drawCurrentShape(x, y);
+    };
+
+    canvas.onmouseup = () => {
+      if (!isDrawing || !currentShape) return;
+      
+      if (currentMode === 'rectangle') {
+        if (currentShape.points.length === 4) {
+          currentShape.complete = true;
+          panels.push(currentShape);
+          undonePanels = [];
+          updatePanelTable();
+          resetCurrentShape();
+        }
+      }
+      
+      isDrawing = false;
+      redraw();
+    };
+
+    // Complete Polygon Button
+    completePolygonBtn.addEventListener('click', () => {
+      if (currentShape && currentShape.type === 'polygon' && currentShape.points.length >= 3) {
+        currentShape.complete = true;
+        panels.push(currentShape);
+        undonePanels = [];
+        updatePanelTable();
+        resetCurrentShape();
+        redraw();
+      }
+    });
+
+    // Drawing Functions
+    function drawCurrentShape(currentX, currentY) {
+      if (!currentShape) return;
+      
+      ctx.strokeStyle = 'rgba(0, 0, 255, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
+      
+      if (currentShape.type === 'rectangle') {
+        if (currentShape.points.length === 4) {
+          drawPolygon(currentShape.points);
+        }
+      } else if (currentShape.type === 'polygon') {
+        ctx.beginPath();
+        ctx.moveTo(currentShape.points[0].x * scale, currentShape.points[0].y * scale);
+        
+        for (let i = 1; i < currentShape.points.length; i++) {
+          ctx.lineTo(currentShape.points[i].x * scale, currentShape.points[i].y * scale);
+        }
+        
+        // Draw line to current mouse position if not complete
+        if (!currentShape.complete) {
+          ctx.lineTo(currentX * scale, currentY * scale);
+        }
+        
+        ctx.stroke();
+        
+        // Draw points
+        ctx.fillStyle = 'blue';
+        currentShape.points.forEach(point => {
+          ctx.beginPath();
+          ctx.arc(point.x * scale, point.y * scale, 4, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+      
+      ctx.setLineDash([]);
+    }
+
+    function drawPolygon(points) {
+      ctx.beginPath();
+      ctx.moveTo(points[0].x * scale, points[0].y * scale);
+      
+      for (let i = 1; i < points.length; i++) {
+        ctx.lineTo(points[i].x * scale, points[i].y * scale);
+      }
+      
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    function redraw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      
+      // Draw all panels
+      panels.forEach((panel, index) => {
+        ctx.strokeStyle = index === selectedPanelIndex ? 'rgba(0, 255, 0, 0.8)' : 'rgba(255, 0, 0, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.fillStyle = index === selectedPanelIndex ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 0, 0, 0.2)';
+        
+        if (panel.type === 'rectangle' || panel.type === 'polygon') {
+          drawPolygon(panel.points);
+          ctx.fill();
+        }
+        
+        // Panel number label
+        const labelPos = getLabelPosition(panel);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+        ctx.fillRect(labelPos.x * scale - 15, labelPos.y * scale - 20, 30, 20);
+        ctx.fillStyle = 'black';
+        ctx.font = '12px Arial';
+        ctx.fillText(`#${index + 1}`, labelPos.x * scale - 10, labelPos.y * scale - 5);
+      });
+      
+      // Draw current shape
+      if (currentShape && !currentShape.complete) {
+        ctx.strokeStyle = 'rgba(0, 0, 255, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        
+        if (currentShape.type === 'rectangle' && currentShape.points.length === 4) {
+          drawPolygon(currentShape.points);
+        } else if (currentShape.type === 'polygon') {
+          ctx.beginPath();
+          ctx.moveTo(currentShape.points[0].x * scale, currentShape.points[0].y * scale);
+          
+          for (let i = 1; i < currentShape.points.length; i++) {
+            ctx.lineTo(currentShape.points[i].x * scale, currentShape.points[i].y * scale);
+          }
+          
+          ctx.stroke();
+          
+          // Draw points
+          ctx.fillStyle = 'blue';
+          currentShape.points.forEach(point => {
+            ctx.beginPath();
+            ctx.arc(point.x * scale, point.y * scale, 4, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        }
+        
+        ctx.setLineDash([]);
+      }
+    }
+
+    function getLabelPosition(panel) {
+      // Find center of the panel
+      if (panel.type === 'rectangle') {
+        return {
+          x: panel.points[0].x + (panel.points[2].x - panel.points[0].x) / 2,
+          y: panel.points[0].y + (panel.points[2].y - panel.points[0].y) / 2
+        };
+      } else if (panel.type === 'polygon') {
+        const center = {x: 0, y: 0};
+        panel.points.forEach(point => {
+          center.x += point.x;
+          center.y += point.y;
+        });
+        center.x /= panel.points.length;
+        center.y /= panel.points.length;
+        return center;
+      }
+      return {x: 0, y: 0};
+    }
+
+    function isPointInShape(point, shape) {
+      // Simple point-in-polygon test
+      if (shape.type === 'rectangle') {
+        const minX = Math.min(...shape.points.map(p => p.x));
+        const maxX = Math.max(...shape.points.map(p => p.x));
+        const minY = Math.min(...shape.points.map(p => p.y));
+        const maxY = Math.max(...shape.points.map(p => p.y));
+        return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+      } else if (shape.type === 'polygon') {
+        // Ray-casting algorithm
+        let inside = false;
+        for (let i = 0, j = shape.points.length - 1; i < shape.points.length; j = i++) {
+          const xi = shape.points[i].x, yi = shape.points[i].y;
+          const xj = shape.points[j].x, yj = shape.points[j].y;
+          
+          const intersect = ((yi > point.y) !== (yj > point.y))
+            && (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      }
+      return false;
+    }
+
+    function resetCurrentShape() {
+      currentShape = null;
+      isDrawing = false;
+    }
+
+    // Panel Table Management
+    function updatePanelTable() {
+      panelTableBody.innerHTML = '';
+      
+      panels.forEach((panel, index) => {
+        const row = document.createElement('tr');
+        if (index === selectedPanelIndex) {
+          row.classList.add('selected-panel');
+        }
+        
+        const coordinates = panel.points.map(p => 
+          `${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
+        
+        row.innerHTML = `
+          <td>${index + 1}</td>
+          <td>${panel.type}</td>
+          <td>${coordinates}</td>
+          <td>
+            <button onclick="selectPanel(${index})">Select</button>
+            <button onclick="deletePanel(${index})">Delete</button>
+          </td>
+        `;
+        
+        panelTableBody.appendChild(row);
+      });
+    }
+
+    // Panel Actions
+    window.selectPanel = function(index) {
+      selectedPanelIndex = index;
+      updatePanelTable();
+      redraw();
+    };
+
+    window.deletePanel = function(index) {
+      undonePanels.push(panels.splice(index, 1)[0]);
+      if (selectedPanelIndex === index) {
+        selectedPanelIndex = -1;
+      }
+      updatePanelTable();
+      redraw();
+    };
+
+    // Control Buttons
+    document.getElementById('clearBtn').onclick = () => {
+      if (panels.length > 0 && confirm('Clear all panels?')) {
+        undonePanels = [...panels];
+        panels = [];
+        selectedPanelIndex = -1;
+        updatePanelTable();
+        redraw();
+      }
+    };
+
+    document.getElementById('undoBtn').onclick = () => {
+      if (panels.length > 0) {
+        undonePanels.push(panels.pop());
+        selectedPanelIndex = -1;
+        updatePanelTable();
+        redraw();
+      } else if (currentShape) {
+        resetCurrentShape();
+        redraw();
+      }
+    };
+
+    document.getElementById('exportBtn').onclick = () => {
+      if (!img || panels.length === 0) {
+        alert('Please upload and mark panels before exporting.');
+        return;
+      }
+      
+      const jsonData = {
+        image: img.src,
+        panels: panels.map(panel => ({
+          type: panel.type,
+          points: panel.points.map(p => ({
+            x: Math.round(p.x),
+            y: Math.round(p.y)
+          }))
+        }))
+      };
+      
+      const json = JSON.stringify(jsonData, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.getElementById('downloadLink');
+      link.href = url;
+      link.download = 'panels.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
+    // Keyboard Shortcuts
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        document.getElementById('undoBtn').click();
+      }
+      if (e.key === 'Escape' && currentShape && !currentShape.complete) {
+        resetCurrentShape();
+        redraw();
+      }
+    });
+  </script>
+</body>
+</html>
